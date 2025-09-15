@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Trash2, Video, Image, Loader2, File } from 'lucide-react';
+import { Upload, Trash2, Video, Image, Loader2, File, AlertCircle } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_BASE ;
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 // Supported file types
 const SUPPORTED_IMAGE_TYPES = [
@@ -14,12 +14,17 @@ const SUPPORTED_VIDEO_TYPES = [
   'video/x-matroska', 'video/webm'
 ];
 
+// Size limits
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;   // 10 MB
+const MAX_VIDEO_SIZE = 500 * 1024 * 1024;  // 500 MB
+
 export default function MediaGallery() {
   const [mediaItems, setMediaItems] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [error, setError] = useState(null);
+  const [galleryType, setGalleryType] = useState('empty'); // 'empty', 'image', 'video'
   const fileInputRef = useRef(null);
 
   const fetchMedia = async () => {
@@ -27,12 +32,9 @@ export default function MediaGallery() {
     setError(null);
     
     try {
-      console.log('Fetching media from:', `${API_BASE}/api/media`);
       const response = await fetch(`${API_BASE}/api/media`);
-      
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        console.error('Server error response:', errorData);
         throw new Error(
           errorData.error || 
           errorData.message || 
@@ -41,14 +43,18 @@ export default function MediaGallery() {
       }
 
       const data = await response.json();
-      console.log('Received media items:', data.length);
       setMediaItems(Array.isArray(data) ? data : []);
+
+      // Determine gallery type based on existing media
+      if (data.length === 0) {
+        setGalleryType('empty');
+      } else {
+        const firstItemType = getFileType(data[0]);
+        setGalleryType(firstItemType === 'video' ? 'video' : 'image');
+      }
+
     } catch (err) {
-      console.error('Fetch error details:', {
-        message: err.message,
-        stack: err.stack
-      });
-      setError(err.message || 'Failed to load media. Please check the console for details.');
+      setError(err.message || 'Failed to load media.');
     } finally {
       setIsFetching(false);
     }
@@ -62,31 +68,50 @@ export default function MediaGallery() {
     const files = Array.from(e.target.files);
     if (!files.length) return;
 
-    // Validate file types
-    const invalidFiles = files.filter(file => 
-      ![...SUPPORTED_IMAGE_TYPES, ...SUPPORTED_VIDEO_TYPES].includes(file.type)
-    );
+    // Check if files match the current gallery type
+    if (galleryType !== 'empty') {
+      const isTryingToUploadImage = files.some(file => 
+        SUPPORTED_IMAGE_TYPES.includes(file.type)
+      );
+      const isTryingToUploadVideo = files.some(file => 
+        SUPPORTED_VIDEO_TYPES.includes(file.type)
+      );
 
-    if (invalidFiles.length > 0) {
-      setError(`Unsupported file types: ${invalidFiles.map(f => f.name).join(', ')}`);
-      return;
+      if (galleryType === 'image' && isTryingToUploadVideo) {
+        setError('Cannot upload videos to an image gallery. Please delete all images first to upload videos.');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+
+      if (galleryType === 'video' && isTryingToUploadImage) {
+        setError('Cannot upload images to a video gallery. Please delete all videos first to upload images.');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+    }
+
+    // Validate file type + size
+    for (const file of files) {
+      if (SUPPORTED_IMAGE_TYPES.includes(file.type) && file.size > MAX_IMAGE_SIZE) {
+        setError(`Image "${file.name}" exceeds 10 MB limit.`);
+        return;
+      }
+      if (SUPPORTED_VIDEO_TYPES.includes(file.type) && file.size > MAX_VIDEO_SIZE) {
+        setError(`Video "${file.name}" exceeds 500 MB limit.`);
+        return;
+      }
+      if (![...SUPPORTED_IMAGE_TYPES, ...SUPPORTED_VIDEO_TYPES].includes(file.type)) {
+        setError(`Unsupported file type: ${file.name}`);
+        return;
+      }
     }
 
     setIsUploading(true);
     setError(null);
 
     try {
-      const IMAGE_LIMIT = 10 * 1024 * 1024;   // 10 MB
-      const VIDEO_LIMIT = 500 * 1024 * 1024;  // 500 MB
-
       const formData = new FormData();
       files.forEach(file => {
-        if (SUPPORTED_IMAGE_TYPES.includes(file.type) && file.size > IMAGE_LIMIT) {
-          throw new Error(`Image ${file.name} exceeds 10MB limit`);
-        }
-        if (SUPPORTED_VIDEO_TYPES.includes(file.type) && file.size > VIDEO_LIMIT) {
-          throw new Error(`Video ${file.name} exceeds 500MB limit`);
-        }
         formData.append('media', file);
       });
 
@@ -107,17 +132,23 @@ export default function MediaGallery() {
       const result = await response.json();
       const newItems = Array.isArray(result) ? result : [result];
       setMediaItems(prev => [...newItems, ...prev]);
+      
+      // Update gallery type based on what was uploaded
+      if (galleryType === 'empty') {
+        const uploadedType = SUPPORTED_VIDEO_TYPES.includes(files[0].type) ? 'video' : 'image';
+        setGalleryType(uploadedType);
+      }
+
     } catch (err) {
-      console.error('Upload error:', err);
-      setError(err.message || 'Failed to upload files. Please check the format and size (max 10MB for images, 500MB for videos).');
+      setError(err.message || 'Failed to upload files.');
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  const handleDelete = async (publicId) => {
-    if (!publicId || !window.confirm('Are you sure you want to delete this media item?')) {
+  const handleDelete = async (item) => {
+    if (!item.public_id || !window.confirm('Are you sure you want to delete this media item?')) {
       return;
     }
 
@@ -125,7 +156,7 @@ export default function MediaGallery() {
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/media/${encodeURIComponent(publicId)}`, {
+      const response = await fetch(`${API_BASE}/api/media/${encodeURIComponent(item.public_id)}`, {
         method: 'DELETE'
       });
 
@@ -138,10 +169,22 @@ export default function MediaGallery() {
         );
       }
 
-      await fetchMedia();
+      // Update local state
+      setMediaItems(prev => {
+        const newItems = prev.filter(media => media.public_id !== item.public_id);
+        
+        // Update gallery type if all media is deleted
+        if (newItems.length === 0) {
+          setGalleryType('empty');
+        }
+        
+        return newItems;
+      });
+
     } catch (err) {
-      console.error('Delete error:', err);
-      setError(err.message || 'Failed to delete item. Please try again.');
+      setError(err.message || 'Failed to delete item.');
+      // Re-fetch to ensure sync with server
+      await fetchMedia();
     } finally {
       setIsDeleting(false);
     }
@@ -149,10 +192,48 @@ export default function MediaGallery() {
 
   const getFileType = (item) => {
     if (item.resource_type === 'video') return 'video';
-    const extension = item.url.split('.').pop().toLowerCase();
+    if (item.resource_type === 'image') return 'image';
+    
+    const extension = item.url?.split('.').pop().toLowerCase();
     return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'tiff', 'bmp', 'ico'].includes(extension) 
       ? 'image' 
       : 'file';
+  };
+
+  const getAcceptTypes = () => {
+    switch (galleryType) {
+      case 'image':
+        return SUPPORTED_IMAGE_TYPES.join(',');
+      case 'video':
+        return SUPPORTED_VIDEO_TYPES.join(',');
+      case 'empty':
+      default:
+        return [...SUPPORTED_IMAGE_TYPES, ...SUPPORTED_VIDEO_TYPES].join(',');
+    }
+  };
+
+  const getGalleryTypeMessage = () => {
+    switch (galleryType) {
+      case 'image':
+        return 'Image Gallery - Only images can be uploaded';
+      case 'video':
+        return 'Video Gallery - Only videos can be uploaded';
+      case 'empty':
+      default:
+        return 'Empty Gallery - Upload images or videos to begin';
+    }
+  };
+
+  const getUploadDescription = () => {
+    switch (galleryType) {
+      case 'image':
+        return 'Images only (JPEG, PNG, GIF, WEBP, SVG, TIFF, BMP, ICO) — max 10 MB';
+      case 'video':
+        return 'Videos only (MP4, MOV, AVI, MKV, WEBM) — max 500 MB';
+      case 'empty':
+      default:
+        return 'Supports images (JPEG, PNG, GIF, WEBP, SVG, TIFF, BMP, ICO) — max 10 MB and videos (MP4, MOV, AVI, MKV, WEBM) — max 500 MB';
+    }
   };
 
   return (
@@ -172,13 +253,23 @@ export default function MediaGallery() {
         </div>
       )}
 
+      {/* Gallery Type Indicator */}
+      {mediaItems.length > 0 && (
+        <div className="mb-4 p-3 bg-blue-900/30 rounded-lg flex items-center">
+          <AlertCircle className="w-5 h-5 mr-2 text-blue-400" />
+          <p className="text-sm">
+            {getGalleryTypeMessage()}
+          </p>
+        </div>
+      )}
+
       <div className="mb-6">
         <input
           type="file"
           ref={fileInputRef}
           onChange={handleFileChange}
           className="hidden"
-          accept={[...SUPPORTED_IMAGE_TYPES, ...SUPPORTED_VIDEO_TYPES].join(',')}
+          accept={getAcceptTypes()}
           multiple
           disabled={isUploading || isFetching}
         />
@@ -205,8 +296,7 @@ export default function MediaGallery() {
           )}
         </button>
         <p className="text-sm text-gray-400 mt-2">
-          Supports images (JPEG, PNG, GIF, WEBP, SVG, TIFF, BMP, ICO) up to 10MB <br />
-          and videos (MP4, MOV, AVI, MKV, WEBM) up to 500MB
+          {getUploadDescription()}
         </p>
       </div>
 
@@ -260,14 +350,14 @@ export default function MediaGallery() {
                     <div className="text-center p-4">
                       <File className="w-12 h-12 mx-auto text-gray-400" />
                       <p className="text-xs mt-2 text-gray-300 truncate">
-                        {item.url.split('/').pop()}
+                        {item.url?.split('/').pop()}
                       </p>
                     </div>
                   </div>
                 )}
 
                 <button
-                  onClick={() => handleDelete(item.public_id)}
+                  onClick={() => handleDelete(item)}
                   disabled={isDeleting}
                   className={`absolute top-2 right-2 p-1.5 rounded-full ${
                     isDeleting
@@ -285,7 +375,7 @@ export default function MediaGallery() {
 
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">
                   <p className="text-xs text-white truncate">
-                    {(item.public_id || item.url.split('/').pop().split('.')[0])}
+                    {(item.public_id || item.url?.split('/').pop()?.split('.')[0])}
                   </p>
                   <p className="text-xs text-gray-300">
                     {type} • {formatBytes(item.bytes)}
